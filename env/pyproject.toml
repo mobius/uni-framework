@@ -1,0 +1,17 @@
+[project]
+name = "uni-scheduler"
+version = "0.1.0"
+description = "Heterogeneous compute scheduler for Intel Phi 7120P + NEC VE 1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "rich>=13.0",
+]
+
+[project.scripts]
+uni-bench = "benchmarks.run_all:main"
+uni-sched = "scheduler.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
