@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-spmv_app.py — 异构 SpMV: Host 分块 + 3×VE 并行乘法
+spmv_app.py — 异构 SpMV: Phi CSR 分块 + 3×VE 并行乘法
 
 Pipeline:
   1. Host: 生成随机稀疏矩阵 (CSR 格式), numpy 计算 y_ref
-  2. Host: 按列分 3 块写入文件
-  3. VE1/2/3: 并行计算各自分块的 SpMV
-  4. Host: 合并 y_partial → y_merged, 对比 y_ref
+  2. Host → scp → Phi: 上传 CSR 到 mic0:/tmp/
+  3. Phi: 244 线程并行 CSR 列分块, 写入 mic0:/tmp/spmv_block_*.bin
+  4. Phi → scp → Host: 下载分块文件
+  5. VE1/2/3: 并行计算各自分块的 SpMV
+  6. Host: 合并 y_partial → y_merged, 对比 y_ref
 
 Usage:
   ./env/.venv/bin/python3 src/apps/hetero_spmv/spmv_app.py [N] [density]
@@ -17,6 +19,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent.parent.parent
 APP_DIR = PROJECT / "src" / "apps" / "hetero_spmv"
+MIC_LIBS = PROJECT.parent / "intel_phi" / "icc_mic_libs"
 
 N = 4096
 DENSITY = 0.01
@@ -29,25 +32,41 @@ def shell(cmd, timeout=120, env=None):
     return r.returncode, r.stdout.strip(), r.stderr.strip(), time.time() - t0
 
 
+def compile_phi():
+    src = APP_DIR / "phi" / "csr_partition.c"
+    out = APP_DIR / "phi" / "csr_partition.mic"
+    if out.exists():
+        return True
+    print("[compile] Phi CSR partition (ICC via podman)...")
+    rc, _, err, _ = shell(
+        f"podman start centos7-phi-dev 2>/dev/null && "
+        f"podman cp {src} centos7-phi-dev:/tmp/csr_partition.c && "
+        f"podman exec centos7-phi-dev bash -c '"
+        f"source /opt/intel/bin/compilervars.sh intel64 && "
+        f"icc -std=c99 -mmic -O3 -openmp -o /tmp/csr_partition.mic /tmp/csr_partition.c' && "
+        f"podman cp centos7-phi-dev:/tmp/csr_partition.mic {out}")
+    if rc != 0:
+        print(f"  FAILED:\n{err}")
+    return rc == 0
+
+
 def compile_ve():
     src = APP_DIR / "ve" / "blocked_spmv.c"
     out = APP_DIR / "ve" / "blocked_spmv_ve"
     if out.exists():
         return True
     rc, _, err, _ = shell(f"ncc -O3 -fopenmp -o {out} {src}")
-    if rc != 0:
-        print(f"[compile] FAILED: {err}")
     return rc == 0
 
 
-def generate_and_partition(N: int, density: float, wd: Path) -> dict:
-    """Generate CSR, partition by columns into 3 blocks, compute y_ref"""
+def generate_csr(N: int, density: float, wd: Path) -> dict:
+    """Generate random CSR matrix + compute y_ref"""
     import numpy as np
     rng = np.random.default_rng(42)
     nnz = max(int(N * N * density), 1)
 
-    rows = rng.integers(0, N, nnz)
-    cols = rng.integers(0, N, nnz)
+    rows = rng.integers(0, N, nnz, dtype=np.int32)
+    cols = rng.integers(0, N, nnz, dtype=np.int32)
     vals = rng.normal(0, 1.0, nnz).astype(np.float64)
 
     order = np.argsort(rows)
@@ -57,74 +76,94 @@ def generate_and_partition(N: int, density: float, wd: Path) -> dict:
     np.add.at(row_ptr, rows + 1, 1)
     np.cumsum(row_ptr, out=row_ptr)
 
-    nnz = row_ptr[-1]
+    nnz = int(row_ptr[-1])
     rows, cols, vals = rows[:nnz], cols[:nnz], vals[:nnz]
-
     x = rng.normal(0, 1.0, N).astype(np.float64)
 
-    # Reference: y = A @ x
+    # Reference
     y_ref = np.zeros(N)
     for j in range(nnz):
         y_ref[rows[j]] += vals[j] * x[cols[j]]
-    ref_checksum = float(y_ref.sum())
 
-    # Partition: 3 equal column ranges
-    chunk = (N + 2) // 3
-    blocks = []
-    for v in range(3):
-        c_start = v * chunk
-        c_end = N if v == 2 else (v + 1) * chunk
-
-        # Filter non-zeros in column range
-        mask = (cols >= c_start) & (cols < c_end)
-        idx = np.where(mask)[0]
-        b_nnz = len(idx)
-        b_rows = rows[idx]
-        b_cols = cols[idx]
-        b_vals = vals[idx]
-
-        # Build row_ptr for this block
-        b_row_ptr = np.zeros(N + 1, dtype=np.int32)
-        np.add.at(b_row_ptr, b_rows + 1, 1)
-        np.cumsum(b_row_ptr, out=b_row_ptr)
-
-        blocks.append({
-            "nnz": b_nnz, "col_start": c_start, "col_end": c_end,
-            "row_ptr": b_row_ptr, "cols": b_cols, "vals": b_vals,
-        })
-
-    print(f"[host] N={N}, nnz={nnz} ({density*100:.1f}%), "
-          f"y_ref checksum={ref_checksum:.3f}")
-
-    # Write blocks + full CSR
+    # Write CSR
     wd.mkdir(parents=True, exist_ok=True)
-    for v, b in enumerate(blocks):
-        path = wd / f"block_{v}.bin"
-        with open(path, "wb") as f:
-            f.write(struct.pack("i", N))
-            f.write(struct.pack("i", b["nnz"]))
-            f.write(struct.pack("i", b["col_start"]))
-            f.write(struct.pack("i", b["col_end"]))
-            f.write(b["row_ptr"].astype(np.int32).tobytes())
-            f.write(b["cols"].astype(np.int32).tobytes())
-            f.write(b["vals"].astype(np.float64).tobytes())
-            f.write(x.astype(np.float64).tobytes())
-        print(f"  block {v}: nnz={b['nnz']} cols=[{b['col_start']},{b['col_end']})")
-
-    # Save full CSR + x + y_ref for verification
-    full_path = wd / "input.csr"
-    with open(full_path, "wb") as f:
+    csr_path = wd / "input.csr"
+    with open(csr_path, "wb") as f:
         f.write(struct.pack("i", N))
         f.write(struct.pack("i", nnz))
         f.write(row_ptr.tobytes())
-        f.write(cols.tobytes())
+        f.write(cols.astype(np.int32).tobytes())
         f.write(vals.tobytes())
         f.write(x.tobytes())
 
     (wd / "y_ref.bin").write_bytes(struct.pack("i", N) + y_ref.tobytes())
-    (wd / "x.bin").write_bytes(struct.pack("i", N) + x.tobytes())
 
-    return {"N": N, "nnz": nnz, "blocks": blocks, "y_ref_checksum": ref_checksum}
+    print(f"[host] N={N}, nnz={nnz} ({density*100:.1f}%), "
+          f"y_ref checksum={y_ref.sum():.3f}")
+    return {"N": N, "nnz": nnz, "csr_path": csr_path}
+
+
+def run_phi_partition(csr_path: Path, wd: Path) -> tuple[float, dict]:
+    """scp CSR → Phi partition → scp blocks back"""
+    import uuid
+    exe = APP_DIR / "phi" / "csr_partition.mic"
+    env = os.environ.copy()
+    if MIC_LIBS.is_dir():
+        env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
+
+    # Unique run ID to avoid stale files
+    run_id = uuid.uuid4().hex[:8]
+    remote_prefix = f"/tmp/spmv_{run_id}"
+    remote_in = f"{remote_prefix}_input.csr"
+    remote_full = f"{remote_prefix}_full.csr"
+
+    # 1. scp CSR to Phi
+    print(f"[phi] scp input → mic0:{remote_in}")
+    t0 = time.time()
+    rc, _, err, _ = shell(f"scp {csr_path} mic0:{remote_in}", timeout=30)
+    if rc != 0:
+        print(f"  scp FAILED: {err}")
+        return 0, {}
+    print(f"  ✓ {time.time()-t0:.1f}s")
+
+    # 2. Run Phi partition
+    print("[phi] CSR partition (244 threads)...")
+    t0 = time.time()
+    args = f'"{remote_in} {remote_prefix}"'
+    rc, out, err, _ = shell(
+        f"micnativeloadex {exe} -d 0 -t 60 -a {args}", timeout=120, env=env)
+    phi_time = time.time() - t0
+    for line in (out + err).splitlines():
+        if line.strip():
+            print(f"    {line.strip()}")
+    if rc != 0:
+        print(f"  Phi FAILED: {err}")
+        return phi_time, {}
+    print(f"  ✓ {phi_time:.1f}s")
+
+    # 3. scp blocks back
+    blocks = []
+    meta = {}
+    print(f"[phi] scp blocks ← mic0:{remote_prefix}_*.bin")
+    for i in range(3):
+        remote = f"mic0:{remote_prefix}_block_{i}.bin"
+        local = wd / f"block_{i}.bin"
+        rc, _, err, _ = shell(f"scp {remote} {local}", timeout=30)
+        if rc == 0 and local.exists():
+            blocks.append(local)
+            data = local.read_bytes()
+            meta["N"] = struct.unpack("i", data[:4])[0]
+            meta["nnz"] = struct.unpack("i", data[4:8])[0]
+            print(f"  block_{i}: {local.stat().st_size//1024}KB ✓")
+        else:
+            print(f"  block_{i}: FAILED - {err}")
+
+    # 4. scp full CSR
+    rc, _, err, _ = shell(f"scp mic0:{remote_full} {wd / 'input.csr'}", timeout=30)
+    if rc == 0:
+        print(f"  full_csr: {(wd/'input.csr').stat().st_size//1024}KB ✓")
+
+    return phi_time, {"N": meta.get("N", N), "blocks": blocks}
 
 
 async def run_ve_spmv(ve_id: int, block_path: Path, out_path: Path) -> dict:
@@ -144,7 +183,6 @@ async def run_ve_spmv(ve_id: int, block_path: Path, out_path: Path) -> dict:
         if token.startswith("BW="):
             bw = float(token.rstrip("_GB/s").split("=")[1])
     print(f"    {text.strip()[:120]}")
-
     return {"device": f"ve{ve_id}", "elapsed": elapsed, "nnz": nnz, "bw": bw}
 
 
@@ -166,20 +204,28 @@ def merge_and_verify(wd: Path) -> tuple[bool, float, float]:
 
 async def main():
     print("=" * 60)
-    print("  异构 SpMV: Host 列分块 + 3×VE 并行")
+    print("  异构 SpMV: Phi CSR 分块 + 3×VE 并行乘法")
     print(f"  N={N}  density={DENSITY}")
     print("=" * 60)
 
     wd = APP_DIR / "run_data"
-    if not compile_ve():
-        print("❌ VE 编译失败")
+
+    if not compile_phi() or not compile_ve():
+        print("❌ 编译失败")
         return
 
-    # 1. Generate + partition
+    # 1. Generate CSR
     print()
-    meta = generate_and_partition(N, DENSITY, wd)
+    meta = generate_csr(N, DENSITY, wd)
 
-    # 2. VE parallel SpMV
+    # 2. Phi partition (scp → Phi → scp)
+    print()
+    phi_time, phi_meta = run_phi_partition(meta["csr_path"], wd)
+    if not phi_meta.get("blocks"):
+        print("❌ Phi 分块失败")
+        return
+
+    # 3. VE parallel SpMV
     print(f"\n[ve] 并行分块 SpMV...")
     t0 = time.time()
     tasks = [run_ve_spmv(i+1, wd / f"block_{i}.bin", wd / f"y_partial_{i}.bin")
@@ -192,7 +238,7 @@ async def main():
         total_nnz += r["nnz"]
         print(f"  {r['device']}: nnz={r['nnz']} {r['elapsed']:.4f}s BW={r['bw']:.2f} GB/s")
 
-    # 3. Verify
+    # 4. Verify
     print()
     ok, max_diff, mean_diff = merge_and_verify(wd)
 
@@ -200,9 +246,8 @@ async def main():
     print("  结果")
     print("=" * 60)
     print(f"  矩阵: N={N}, nnz={meta['nnz']}")
-    print(f"  分块: VE0={meta['blocks'][0]['nnz']} VE1={meta['blocks'][1]['nnz']} "
-          f"VE2={meta['blocks'][2]['nnz']}")
-    print(f"  VE 并行耗时: {ve_time:.3f}s")
+    print(f"  Phi 分块: {phi_time:.1f}s (scp+partition+scp)")
+    print(f"  VE 并行:  {ve_time:.3f}s")
     print(f"  max_diff:  {max_diff:.2e}")
     print(f"  mean_diff: {mean_diff:.2e}")
     print(f"  正确性:    {'✅ 通过' if ok else '❌ 失败'}")
