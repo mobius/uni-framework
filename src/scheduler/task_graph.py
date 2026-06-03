@@ -18,6 +18,10 @@ class TaskNode:
     run_fn: Callable     # async callable that returns dict
     depends_on: list[str] = field(default_factory=list)
     
+    # Power estimation (Phase 2: PowerCap integration)
+    op: str = "idle"                        # operation type for power estimation
+    estimated_watts: float = 0.0            # estimated power draw
+
     # Runtime state
     status: str = "pending"   # pending | ready | running | done | failed
     result: Optional[dict] = None
@@ -33,13 +37,56 @@ class TaskGraph:
         graph.add(TaskNode("gen", "host", gen_fn))
         graph.add(TaskNode("matmul", "ve1", matmul_fn, depends_on=["gen"]))
         results = await graph.execute()
+
+        # 带功率封顶:
+        from scheduler.power import PowerCap
+        cap = PowerCap(psu_limit_w=1600)
+        graph = TaskGraph(power_cap=cap)
+        results = await graph.execute()
     """
     
-    def __init__(self):
+    def __init__(self, power_cap=None):
         self.nodes: dict[str, TaskNode] = {}
+        self._power_cap = power_cap  # Optional PowerCap instance
     
     def add(self, node: TaskNode):
         self.nodes[node.name] = node
+
+    def estimated_total_power(self) -> float:
+        """估算所有任务并发时的总功耗 (watts)"""
+        # Sum estimated watts of all nodes (worst case: all running at once)
+        return sum(n.estimated_watts for n in self.nodes.values())
+
+    def _check_power(self, devices: list[dict]) -> bool:
+        """检查功率预算是否允许启动这批设备
+
+        Args:
+            devices: List of dicts with 'name' (device name) and 'op' (operation type)
+
+        Returns:
+            True if within budget or no power cap configured
+        """
+        if self._power_cap is None:
+            return True
+
+        dev_names = [d["name"] for d in devices]
+        ops = {d["name"]: d.get("op", "idle") for d in devices}
+        return self._power_cap.can_launch(dev_names, ops)
+
+    def _reserve_power(self, devices: list[dict]):
+        """预留功率预算"""
+        if self._power_cap is None:
+            return
+        dev_names = [d["name"] for d in devices]
+        ops = {d["name"]: d.get("op", "idle") for d in devices}
+        self._power_cap.reserve(dev_names, ops)
+
+    def _release_power(self, devices: list[dict]):
+        """释放功率预算"""
+        if self._power_cap is None:
+            return
+        dev_names = [d["name"] for d in devices]
+        self._power_cap.release(dev_names)
     
     async def execute(self, verbose: bool = True) -> dict:
         """执行 DAG，返回 {task_name: result_dict}"""
@@ -63,17 +110,40 @@ class TaskGraph:
                 if all(dep in results for dep in node.depends_on):
                     ready.append(name)
             
-            # 启动就绪任务
+            # 启动就绪任务 (带功率预算检查)
+            launchable = []  # tasks we can afford to launch
+            deferred = []    # tasks that exceed power budget
+
             for name in ready:
+                node = self.nodes[name]
+                dev_info = {"name": node.device, "op": node.op}
+
+                # Check if adding this device fits in power budget
+                if self._check_power([dev_info]):
+                    launchable.append(name)
+                    self._reserve_power([dev_info])
+                else:
+                    deferred.append(name)
+                    if verbose:
+                        print(f"  ⏸ {name} [{node.device}] 功率预算不足，等待... "
+                              f"({self._power_cap.status() if self._power_cap else 'no cap'})")
+
+            # Launch affordable tasks
+            for name in launchable:
                 pending.remove(name)
+            for name in deferred:
+                pass  # keep in pending for next iteration
+
+            for name in launchable:
                 node = self.nodes[name]
                 node.status = "running"
                 node.start_time = time.time()
-                
+
                 if verbose:
                     deps_str = f" (dep: {node.depends_on})" if node.depends_on else ""
-                    print(f"  ▶ {name} [{node.device}]{deps_str}")
-                
+                    power_str = f" [{node.estimated_watts:.0f}W]" if node.estimated_watts > 0 else ""
+                    print(f"  ▶ {name} [{node.device}]{power_str}{deps_str}")
+
                 running[name] = asyncio.create_task(
                     self._run_node(name, node)
                 )
@@ -112,10 +182,16 @@ class TaskGraph:
                                 results[name] = node.result
                                 if verbose:
                                     print(f"  ❌ {name} FAILED: {e}")
-                            
+
                             del running[name]
+
+                            # Release power reservation
+                            self._release_power(
+                                [{"name": node.device, "op": node.op}]
+                            )
+
                             break
-        
+
         total_time = time.time() - start_all
         
         if verbose:

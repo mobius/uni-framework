@@ -41,8 +41,12 @@ def compile_phi_kernel() -> bool:
     return True
 
 
-def run_phi_kernel() -> dict:
-    """在 Phi 上运行内核，返回结果"""
+def run_phi_kernel(auto_numa: bool = True) -> dict:
+    """在 Phi 上运行内核，返回结果
+
+    Args:
+        auto_numa: 自动从 NUMABinder 获取最优 NUMA 绑定 (默认开启)
+    """
     if not PHI_KERNEL_BIN.exists():
         print("[phi] 内核二进制不存在，尝试编译...")
         if not compile_phi_kernel():
@@ -56,7 +60,19 @@ def run_phi_kernel() -> dict:
     if mic_lib_path.is_dir():
         env["SINK_LD_LIBRARY_PATH"] = str(mic_lib_path)
 
-    cmd = f"micnativeloadex {PHI_KERNEL_BIN} -d 0 -t 60"
+    # NUMA 绑定
+    prefix = ""
+    if auto_numa:
+        try:
+            from .numa import best_node
+            node = best_node("phi0")
+            if node >= 0:
+                prefix = f"numactl --cpunodebind={node} --membind={node} "
+                print(f"[phi] NUMA 绑定: node {node}")
+        except ImportError:
+            pass
+
+    cmd = f"{prefix}micnativeloadex {PHI_KERNEL_BIN} -d 0 -t 60"
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=120,
         env=env

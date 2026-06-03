@@ -33,12 +33,14 @@ def compile_ve_kernel() -> bool:
     return True
 
 
-def run_ve_kernel(ve_id: int, numa_node: int = -1) -> dict:
+def run_ve_kernel(ve_id: int, numa_node: int = -1,
+                  auto_numa: bool = True) -> dict:
     """在指定 VE 卡上运行内核
 
     Args:
         ve_id: VE 编号 (1/2/3, 对应 ve_exec -N)
-        numa_node: NUMA 节点 (-1 表示不绑定)
+        numa_node: NUMA 节点 (-1 表示自动选择，>=0 指定节点)
+        auto_numa: 自动从 NUMABinder 获取最优 NUMA 绑定 (默认开启)
 
     Returns:
         dict with status, gflops, elapsed_sec, stdout, stderr
@@ -50,10 +52,14 @@ def run_ve_kernel(ve_id: int, numa_node: int = -1) -> dict:
 
     print(f"[ve{ve_id}] 运行 ve_exec -N {ve_id}...")
 
-    # 可选 NUMA 绑定
+    # NUMA 绑定: 自动选择 > 手动指定 > 不绑定
     prefix = ""
+    if auto_numa and numa_node < 0:
+        from .numa import best_node as get_best_node
+        numa_node = get_best_node(f"ve{ve_id}")
     if numa_node >= 0:
         prefix = f"numactl --cpunodebind={numa_node} --membind={numa_node} "
+        print(f"[ve{ve_id}] NUMA 绑定: node {numa_node}")
 
     cmd = f"{prefix}/opt/nec/ve/bin/ve_exec -N {ve_id} {VE_KERNEL_BIN}"
 
