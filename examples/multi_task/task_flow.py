@@ -49,12 +49,12 @@ def run(cmd: str, timeout: int = 120, env: dict = None) -> dict:
     }
 
 
-def compile_ve(name: str, src: str) -> bool:
+def compile_ve(name: str, src: str, extra_flags: str = "") -> bool:
     """Compile a VE kernel"""
     exe = KERNEL_VE / name
     if exe.exists():
         return True
-    cmd = f"ncc -O3 -fopenmp -o {exe} {KERNEL_VE / src}"
+    cmd = f"ncc -O3 -fopenmp {extra_flags} -o {exe} {KERNEL_VE / src}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
     ok = result.returncode == 0
     if ok:
@@ -62,6 +62,9 @@ def compile_ve(name: str, src: str) -> bool:
     else:
         print(f"  [compile] {name} ❌\n{result.stderr}")
     return ok
+
+NLC_FLAGS = "-I/opt/nec/ve/nlc/3.1.0/include -L/opt/nec/ve/nlc/3.1.0/lib -lcblas -lblas_openmp"
+NLC_ENV = {"VE_LD_LIBRARY_PATH": "/opt/nec/ve/nlc/3.1.0/lib"}
 
 
 def compile_phi(name: str, src: str) -> bool:
@@ -135,13 +138,15 @@ def task_gen():
 
 
 def task_matmul(ve_id: int, block_id: int, depends_on: list):
-    """Task 1/2/3: VE matrix multiplication on a block"""
+    """Task 1/2/3: VE NLC DGEMM"""
     input_file  = WORKDIR / f"input_{block_id}.bin"
     output_file = WORKDIR / f"result_{block_id}.bin"
-    exe = KERNEL_VE / "matmul_block_ve"
+    exe = KERNEL_VE / "dgemm_nlc_ve"
     
+    env = os.environ.copy()
+    env["VE_LD_LIBRARY_PATH"] = "/opt/nec/ve/nlc/3.1.0/lib"
     cmd = f"/opt/nec/ve/bin/ve_exec -N {ve_id} {exe} {input_file} {output_file}"
-    result = run(cmd, timeout=120)
+    result = run(cmd, timeout=120, env=env)
     
     # Parse GFLOPS from output
     gflops = 0.0
@@ -253,7 +258,7 @@ async def main():
     # Step 1: Compile
     banner("编译内核")
     ok = all([
-        compile_ve("matmul_block_ve", "matmul_block.c"),
+        compile_ve("dgemm_nlc_ve", "dgemm_nlc.c", NLC_FLAGS),
         compile_ve("aggregate_ve", "aggregate.c"),
     ])
     if not ok:

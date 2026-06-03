@@ -30,11 +30,11 @@ def shell(cmd, env=None, timeout=120):
     return r.returncode, r.stdout, r.stderr, time.time() - t0
 
 
-def compile_ve(name, src):
+def compile_ve(name, src, extra=""):
     k = PROJECT / "src" / "kernels" / "ve"
     exe = k / name
     if exe.exists(): return True
-    rc, _, err, _ = shell(f"ncc -O3 -fopenmp -o {exe} {k / src}")
+    rc, _, err, _ = shell(f"ncc -O3 -fopenmp {extra} -o {exe} {k / src}")
     if rc != 0: print(f"  [compile] {name} ❌\n{err}")
     return rc == 0
 
@@ -93,7 +93,8 @@ def bench_multitask(p: Profiler):
     kv = PROJECT / "src" / "kernels" / "ve"
     kp = PROJECT / "src" / "kernels" / "phi"
 
-    compile_ve("matmul_block_ve", "matmul_block.c")
+    compile_ve("dgemm_nlc_ve", "dgemm_nlc.c",
+               "-I/opt/nec/ve/nlc/3.1.0/include -L/opt/nec/ve/nlc/3.1.0/lib -lcblas -lblas_openmp")
     compile_ve("aggregate_ve", "aggregate.c")
     pk = kp / "peak_fp64.mic"
     env = os.environ.copy()
@@ -113,10 +114,10 @@ def bench_multitask(p: Profiler):
     p.record(e_gen, elapsed)
     print(f"  gen (host): {elapsed:.2f}s")
 
-    # ── dgemm × 3 ──
+    # ── dgemm × 3 (NLC) ──
     for bid, ve_id in [(1, 1), (2, 2), (3, 3)]:
-        est = p.estimate("ve", "dgemm", N=N)
-        exe = kv / "matmul_block_ve"
+        est = p.estimate("ve", "dgemm", N=N, use_nlc=True)
+        exe = kv / "dgemm_nlc_ve"
         inp = wd / f"input_{bid}.bin"
         out = wd / f"result_{bid}.bin"
         _, stdout, _, elapsed = shell(
@@ -174,7 +175,8 @@ def bench_pipeline(p: Profiler):
     kv = PROJECT / "src" / "kernels" / "ve"
     kp = PROJECT / "src" / "kernels" / "phi"
 
-    compile_ve("matmul_block_ve", "matmul_block.c")
+    compile_ve("dgemm_nlc_ve", "dgemm_nlc.c",
+               "-I/opt/nec/ve/nlc/3.1.0/include -L/opt/nec/ve/nlc/3.1.0/lib -lcblas -lblas_openmp")
     compile_ve("scale_ve", "scale.c")
     compile_ve("transpose_ve", "transpose.c")
     pk = kp / "peak_fp64.mic"
@@ -193,10 +195,12 @@ def bench_pipeline(p: Profiler):
     e = p.estimate("host", "gen", N=N); p.record(e, elapsed)
     print(f"  gen (host): {elapsed:.2f}s")
 
-    # ── dgemm (VE1) ──
-    est = p.estimate("ve", "dgemm", N=N)
+    # ── dgemm (VE1, NLC) ──
+    est = p.estimate("ve", "dgemm", N=N, use_nlc=True)
+    nlc_env = os.environ.copy()
+    nlc_env["VE_LD_LIBRARY_PATH"] = "/opt/nec/ve/nlc/3.1.0/lib"
     _, stdout, _, elapsed = shell(
-        f"/opt/nec/ve/bin/ve_exec -N 1 {kv}/matmul_block_ve {wd}/input.bin {wd}/c1.bin")
+        f"/opt/nec/ve/bin/ve_exec -N 1 {kv}/dgemm_nlc_ve {wd}/input.bin {wd}/c1.bin", env=nlc_env)
     gflops = 0.0
     for line in stdout.splitlines():
         if "GFLOPS" in line:

@@ -31,10 +31,12 @@ def run(cmd, timeout=120, env=None):
             "elapsed": time.time() - t0}
 
 
-def compile_ve(name, src):
+NLC_FLAGS = "-I/opt/nec/ve/nlc/3.1.0/include -L/opt/nec/ve/nlc/3.1.0/lib -lcblas -lblas_openmp"
+
+def compile_ve(name, src, extra_flags=""):
     exe = KERNEL_VE / name
     if exe.exists(): return True
-    r = subprocess.run(f"ncc -O3 -fopenmp -o {exe} {KERNEL_VE / src}",
+    r = subprocess.run(f"ncc -O3 -fopenmp {extra_flags} -o {exe} {KERNEL_VE / src}",
                        shell=True, capture_output=True, text=True, timeout=60)
     ok = r.returncode == 0
     tag = "✅" if ok else "❌"
@@ -66,10 +68,12 @@ def task_gen():
 
 
 def task_dgemm_ve1():
-    """VE1: C1 = A × B"""
-    exe = KERNEL_VE / "matmul_block_ve"
+    """VE1: C1 = A × B (NLC BLAS)"""
+    exe = KERNEL_VE / "dgemm_nlc_ve"
+    env = os.environ.copy()
+    env["VE_LD_LIBRARY_PATH"] = "/opt/nec/ve/nlc/3.1.0/lib"
     cmd = f"/opt/nec/ve/bin/ve_exec -N 1 {exe} {WORKDIR}/input.bin {WORKDIR}/c1.bin"
-    return run(cmd)
+    return run(cmd, env=env)
 
 
 def task_scale_ve2():
@@ -144,7 +148,7 @@ async def main():
     B = lambda s: print(f"\n{'='*55}\n  {s}\n{'='*55}")
 
     B("编译内核")
-    all([compile_ve("matmul_block_ve", "matmul_block.c"),
+    all([compile_ve("dgemm_nlc_ve", "dgemm_nlc.c", NLC_FLAGS),
          compile_ve("scale_ve", "scale.c"),
          compile_ve("transpose_ve", "transpose.c")])
 
