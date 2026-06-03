@@ -41,6 +41,7 @@ uni/
 |------|------|------|
 | 系统全景分析 | `docs/research/20260601_090918_heterogeneous_system_analysis.md` | 硬件规格、瓶颈识别、编程模型、协同模式 |
 | 开发路线图 | `docs/plan/20260601_090918_development_roadmap.md` | Phase 0-4 分阶段规划、时间线、风险 |
+| **性能评估结论** | `docs/research/20260603_bench_conclusions.md` | **全框架基准对比, 5 条核心结论** |
 
 ## 快速开始
 
