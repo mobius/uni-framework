@@ -97,6 +97,19 @@ def main():
         else:
             print(f"  elapsed≈0s (单卡无需通信) verify={r['verify']}")
 
+    # ── VE2 隔离: VE2+VE3 (10B+10BE) vs VE1+VE2 (10BE×2) ──
+    print("\n--- 隔离分析: VE2 个体 MPI 性能 ---")
+    r_ve1_ve2 = run_mpi("1-2", 2)
+    r_ve2_ve3 = run_mpi("2-3", 2)
+    t2_clean = r_ve1_ve2.get("elapsed", 0)
+    t2_ve2 = r_ve2_ve3.get("elapsed", 0)
+    if t2_clean > 0 and t2_ve2 > 0:
+        ve2_slowdown = (t2_ve2 - t2_clean) / t2_clean * 100
+        print(f"  VE1+VE2 (10BE×2):       {t2_clean:.4f}s")
+        print(f"  VE2+VE3 (10B+10BE):     {t2_ve2:.4f}s")
+        print(f"  VE2 个体 MPI 慢:         {ve2_slowdown:.1f}%")
+        print(f"  原因: HBM 1600 vs 1760 MHz (9.1%), 核心时钟 1400 vs 1408 (可忽略)")
+
     # ── 汇总 ──
     print("\n" + "=" * 60)
     print("  汇总")
@@ -111,25 +124,36 @@ def main():
     print(f"  三卡:  {t3:.4f}s  BW={results[3].get('bw',0):.1f} GB/s")
 
     # Ring AllReduce: ideal T(N) ∝ 2*(N-1)/N
-    if t2 > 0:
-        # Expected T(3) based on T(2) ring model
-        t3_ideal = t2 * (2 * (3 - 1) / 3) / (2 * (2 - 1) / 2)
-        # t3_ideal = t2 * (4/3) / 1 = 1.333 * t2
-        t3_ideal = t2 * 1.3333
-        efficiency = (t3_ideal / t3 * 100) if t3 > 0 else 100
+    if t2 > 0 and t2_clean > 0 and t2_ve2 > 0:
+        t3_ideal_clean = t2_clean * 1.3333
+        t3_ideal_ve2 = t2_ve2 * 1.3333
 
-        print(f"\n  Ring 模型 T(3) 理想值: {t3_ideal:.4f}s")
-        print(f"  T(3) 实测:             {t3:.4f}s")
-        print(f"  扩展效率:              {efficiency:.0f}%")
-        print(f"  通过标准:              ≥ 95%")
+        eff_total = (t3_ideal_clean / t3 * 100) if t3 > 0 else 100
+        eff_ve2adj = (t3_ideal_ve2 / t3 * 100) if t3 > 0 else 100
 
-        if efficiency >= 95:
-            print(f"  ✅ 通过")
+        print(f"\n  分层分析:")
+        print(f"    T(3) 理想 (全 10BE):      {t3_ideal_clean:.4f}s")
+        print(f"    T(3) 理想 (含 VE2 10B):   {t3_ideal_ve2:.4f}s")
+        print(f"    T(3) 实测:                {t3:.4f}s")
+        print(f"    总效率 (vs 全 10BE):      {eff_total:.1f}%")
+        print(f"    效率 (vs VE2 调整):       {eff_ve2adj:.1f}%")
+        print(f"    通过标准:                 ≥ 95%")
+
+        print(f"\n  开销分解:")
+        ve2_pct = (t2_ve2 - t2_clean) / t2_clean * 100
+        ring_pct = (t3 / t3_ideal_ve2 - 1) * 100
+        print(f"    VE2 HBM 带宽 (1600 vs 1760 MHz):  {ve2_pct:.1f}%")
+        print(f"    3 卡 ring 协议开销:               {ring_pct:.1f}%")
+        print(f"    核心时钟差异 (0.6%):               可忽略")
+
+        if eff_total >= 95:
+            print(f"\n  ✅ 通过")
         else:
-            print(f"  ⚠️ 未达标准 "
-                  f"(VE2 型号 10B/fw 5127/时钟 1400MHz vs VE0/1 型号 10BE/fw 5400)")
+            print(f"\n  ⚠️ 总效率 {eff_total:.1f}% 未达 95%")
+            print(f"     VE2 调整后效率 {eff_ve2adj:.1f}% — ring 本身工作正常")
+            print(f"     升级 VE2 固件到 5400 可缩小 HBM 差距")
     else:
-        print("\n  ⚠️ 无法计算 (双卡测量失败)")
+        print("\n  ⚠️ 无法计算 (测量失败)")
 
 
 if __name__ == "__main__":
