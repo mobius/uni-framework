@@ -18,8 +18,12 @@ Thumbs.db
 *.mic
 *.o
 *.mod
+*_ve
 
 # Logs
 *.log
 logs/
 results/
+
+# Multi-task run data
+examples/multi_task/run_data/

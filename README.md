@@ -45,18 +45,27 @@ uni/
 ## 快速开始
 
 ```bash
-# 硬件检查
+# 1. 硬件检查
 bash scripts/check_hw.sh
 
-# 初始化 Python 环境
+# 2. 初始化 Python 环境 (uv, 不污染全局)
 cd env
 uv venv
 source .venv/bin/activate
-uv pip install -e .
+uv pip install numpy rich
 
-# 运行基准测试
-uni-bench
+# 3. 运行示例
+cd ..
+bash examples/basic/run.sh      # 四卡并行基线验证
+bash examples/multi_task/run.sh # 多卡 DAG 任务流
 ```
+
+## 示例
+
+| 示例 | 路径 | 说明 |
+|------|------|------|
+| Basic | `examples/basic/` | 4 卡独立 FP64 峰值验证 |
+| Multi-Task | `examples/multi_task/` | 6 任务 DAG 异构流 |
 
 ## 关键约束
 
