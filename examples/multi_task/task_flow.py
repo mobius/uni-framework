@@ -4,8 +4,9 @@ multi_task/task_flow.py — 多卡异构任务流演示
 
 DAG:
   task_gen (Host) ──┬── task_matmul_1 (VE1) ──┐
-                    ├── task_matmul_2 (VE2) ──┼── task_agg (VE1) ── task_stats (Phi)
-                    └── task_matmul_3 (VE3) ──┘
+                    ├── task_matmul_2 (VE2) ──┤
+                    ├── task_matmul_3 (VE3) ──┼── task_agg (VE1) ── task_stats (Host)
+                    └── task_phi (Phi) ───────┘
 
 用法:
     python3.11 examples/multi_task/task_flow.py
@@ -168,6 +169,49 @@ def task_aggregate():
     return run(cmd, timeout=60)
 
 
+def task_phi_peak():
+    """Task phi: FP64 peak test on Phi (并行于 VE matmul)
+    
+    无文件 I/O — 直接跑 micnativeloadex, 纯 stdout 输出 GFLOPS.
+    依赖 gen 只是为了串行化启动, 不消费 gen 的数据.
+    """
+    exe = KERNEL_PH / "peak_fp64.mic"
+    
+    # 复用 Basic 示例的峰值内核
+    if not exe.exists():
+        print("[phi] peak_fp64.mic 不存在, 尝试编译...")
+        os.system("podman start centos7-phi-dev 2>/dev/null")
+        # 复制源码到容器编译
+        src = KERNEL_PH / "peak_fp64.c"
+        cmd = (
+            f"podman cp {src} centos7-phi-dev:/tmp/peak_fp64.c && "
+            f"podman exec centos7-phi-dev bash -c '"
+            f"source /opt/intel/bin/compilervars.sh intel64 && "
+            f"icc -std=c99 -mmic -O3 -openmp -o /tmp/peak_fp64.mic /tmp/peak_fp64.c' && "
+            f"podman cp centos7-phi-dev:/tmp/peak_fp64.mic {exe}"
+        )
+        subprocess.run(cmd, shell=True, capture_output=True, timeout=120)
+    
+    env = os.environ.copy()
+    if MIC_LIBS.is_dir():
+        env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
+    
+    cmd = f"micnativeloadex {exe} -d 0 -t 60"
+    result = run(cmd, timeout=120, env=env)
+    
+    # Parse GFLOPS from Phi output
+    gflops = 0.0
+    for line in result["stdout"].splitlines():
+        if "GFLOPS" in line:
+            try:
+                gflops = float(line.split(":")[-1].strip().split()[0])
+            except (ValueError, IndexError):
+                pass
+    
+    result["gflops"] = gflops
+    return result
+
+
 def task_stats():
     """Task 5: Compute statistics on Host (Python)
     
@@ -211,7 +255,6 @@ async def main():
     ok = all([
         compile_ve("matmul_block_ve", "matmul_block.c"),
         compile_ve("aggregate_ve", "aggregate.c"),
-        compile_phi("stats.mic", "stats.c"),
     ])
     if not ok:
         print("❌ 编译失败，退出")
@@ -233,8 +276,9 @@ async def main():
     graph.add(TaskNode("matmul_1",  "ve1",  lambda: task_matmul(1, 1, ["gen"]),    depends_on=["gen"]))
     graph.add(TaskNode("matmul_2",  "ve2",  lambda: task_matmul(2, 2, ["gen"]),    depends_on=["gen"]))
     graph.add(TaskNode("matmul_3",  "ve3",  lambda: task_matmul(3, 3, ["gen"]),    depends_on=["gen"]))
+    graph.add(TaskNode("phi_peak",  "phi0", task_phi_peak,                          depends_on=["gen"]))
     graph.add(TaskNode("aggregate", "ve1",  task_aggregate,                         depends_on=["matmul_1", "matmul_2", "matmul_3"]))
-    graph.add(TaskNode("stats",     "phi0", task_stats,                             depends_on=["aggregate"]))
+    graph.add(TaskNode("stats",     "host", task_stats,                             depends_on=["aggregate"]))
     
     # Step 4: Execute
     banner("执行任务流")
