@@ -24,7 +24,7 @@
 | 1 | 统一软件栈搭建 (uv/ncc/ICC) | ✅ |
 | 2 | 核心调度层 (7 模块) | ✅ |
 | 3 | 协同基准测试 (TC-001~006) | ✅ 4/6 通过, 5/6 标注 |
-| 4 | 示例应用 (SpMV + 数据预处理) | ✅ |
+| 4 | 示例应用 (SpMV + 预处理 + MC) | ✅ |
 
 ## 目录结构
 
@@ -88,6 +88,10 @@ bash examples/basic/run.sh          # 四卡并行基线 (3,277 GFLOPS)
 # 5. 运行示例应用
 ./env/.venv/bin/python3 src/apps/hetero_spmv/spmv_app.py        # 异构 SpMV
 ./env/.venv/bin/python3 src/apps/hetero_dataprep/dataprep_app.py # 数据预处理
+./env/.venv/bin/python3 src/apps/monte_carlo/mc_app.py          # Monte Carlo 定价
+
+# 6. 一键验收
+bash scripts/run_all.sh 2>&1 | tee acceptance.log
 ```
 
 ## 基准测试结果摘要
@@ -114,6 +118,7 @@ bash examples/basic/run.sh          # 四卡并行基线 (3,277 GFLOPS)
 |------|------|------|------|
 | 异构 SpMV | `src/apps/hetero_spmv/` | Host→Phi分块→3VE并行乘法 | 0.107s, max_diff 1.07e-14 |
 | 数据预处理 | `src/apps/hetero_dataprep/` | Phi清洗→VE1标准化→VE2 PCA | corr 0.997, std diff 3.55e-15 |
+| Monte Carlo | `src/apps/monte_carlo/` | Phi路径→3VE payoff 折现 | diff 0.15% vs numpy |
 
 ## 调度层架构
 
