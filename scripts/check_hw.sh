@@ -63,15 +63,15 @@ if [ "$VE_COUNT" -gt 0 ]; then
     # PCIe 链路
     info "PCIe 链路状态:"
     for dev in $(lspci | grep "NEC" | awk '{print $1}'); do
-        speed=$(lspci -vv -s "$dev" 2>/dev/null | grep "LnkSta:" | head -1)
+        speed=$(lspci -vv -s "$dev" 2>/dev/null | grep "LnkSta:" | head -1 || echo "LnkSta: unknown (需 root)")
         numa=$(lspci -vv -s "$dev" 2>/dev/null | grep "NUMA" || echo "NUMA: unknown")
         info "  $dev: $speed | $numa"
     done
     echo
 
-    # VEOS 服务
+    # VEOS 服务 (AVEO 编号 1-3)
     info "VEOS 服务状态:"
-    for i in 0 1 2; do
+    for i in 1 2 3; do
         if systemctl is-active ve-os-launcher@$i.service &>/dev/null; then
             pass "ve-os-launcher@$i.service: $(systemctl is-active ve-os-launcher@$i.service)"
         else
@@ -87,11 +87,15 @@ if [ "$VE_COUNT" -gt 0 ]; then
     fi
     echo
 
-    # 固件版本
+    # 固件版本 (sysfs 编号 0-2; numa_node 缺失时回退 lspci)
     info "固件版本:"
     for i in 0 1 2; do
         fw=$(cat /sys/class/ve/ve$i/fw_version 2>/dev/null || echo "N/A")
-        node=$(cat /sys/class/ve/ve$i/numa_node 2>/dev/null || echo "N/A")
+        node=$(cat /sys/class/ve/ve$i/numa_node 2>/dev/null || true)
+        if [ -z "$node" ]; then
+            pci_addr=$(readlink /sys/class/ve/ve$i/device 2>/dev/null | awk -F/ '{print $NF}')
+            node=$(lspci -vv -s "$pci_addr" 2>/dev/null | grep "NUMA node" | awk '{print $NF}' || echo "N/A")
+        fi
         info "  VE$i: fw=$fw, numa_node=$node"
     done
     echo
@@ -136,10 +140,14 @@ if [ "$PHI_COUNT" -gt 0 ]; then
     fi
     echo
 
-    # Phi 温度
+    # Phi 温度 (micinfo 在 Host 侧上报, 卡内无 /sys/class/thermal)
     info "Phi 温度:"
-    ssh -o ConnectTimeout=5 mic0 cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null \
-        | awk '{printf "  %.1f°C\n", $1/1000}' || warn "无法 SSH 到 mic0"
+    if command -v micinfo &>/dev/null; then
+        micinfo 2>/dev/null | grep "Die Temp" | awk -F: '{printf "  Die Temp:%s\n", $2}' \
+            || warn "micinfo 无法读取温度"
+    else
+        warn "micinfo 未安装"
+    fi
 fi
 echo
 

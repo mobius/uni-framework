@@ -55,8 +55,8 @@ lspci -t -v | grep -A2 -E "NEC|Phi"
 # 对照 ESC4000G4 物理布局
 
 # 0.7 Phi 满载 10min 温度测试
-# 编译并运行 phi_peak_fp64.mic，监控温度
-ssh mic0 cat /sys/class/thermal/thermal_zone0/temp
+# 编译并运行 phi_peak_fp64.mic，监控温度 (micinfo Host 侧上报 Die Temp)
+micinfo | grep "Die Temp"
 
 # 0.8 VE 三卡并发满载功耗测试
 # 同时运行三卡 ve_matmul，监控功耗

@@ -47,7 +47,8 @@ uni/
 │   ├── kernels/{phi,ve}/          # 计算内核 (FMA/dgemm/MPI/PCIe)
 │   ├── apps/
 │   │   ├── hetero_spmv/           # 异购 SpMV (Phi分块+3VE并行)
-│   │   └── hetero_dataprep/       # 数据预处理流水线
+│   │   ├── hetero_dataprep/       # 数据预处理流水线
+│   │   └── monte_carlo/           # Monte Carlo 亚式障碍期权定价
 │   └── benchmarks/                # 基准测试封装
 ├── scripts/                       # 基准脚本 (TC-001~004)
 ├── examples/                      # 示例 (basic/multi_task/pipeline/throughput)
@@ -62,9 +63,13 @@ uni/
 | `docs/plan/20260601_090918_development_roadmap.md` | Phase 0-4 分阶段规划 |
 | `docs/research/20260603_bench_conclusions.md` | 全框架基准对比, 5条核心结论 |
 | `docs/plan/20260603_phase3_bench_plan.md` | Phase 3 基准测试计划 |
-| `docs/plan/20260603_phase4_app_plan.md` | Phase 4 应用计划 |
+| `docs/plan/20260604_monte_carlo_plan.md` | Monte Carlo 应用计划 |
+| `docs/research/20260604_virtio_investigation.md` | Phi VirtIO 文件 I/O 调查 (结论: scp 最优) |
 | `docs/impl/20260603_phase2_close.md` | Phase 2 收尾: NUMA+Power |
 | `docs/impl/20260603_phase4_impl.md` | Phase 4 应用实现记录 |
+| `docs/impl/20260604_tc005_power.md` | TC-005/006 功率封顶+稳定性 |
+| `docs/impl/20260604_project_summary.md` | 项目终期总结 |
+| `docs/impl/20260720_final_acceptance.md` | 终期验收报告 (Week 6 收尾) |
 
 ## 快速开始
 

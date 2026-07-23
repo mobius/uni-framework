@@ -4,6 +4,7 @@
 # Usage: bash scripts/run_all.sh 2>&1 | tee docs/impl/$(date +%Y%m%d_%H%M%S)_acceptance.log
 
 set -e
+set -o pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON=./env/.venv/bin/python3
@@ -11,7 +12,7 @@ PASS=0; FAIL=0; TOTAL=0
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 check() {
-    local name="$1" shift
+    local name="$1"; shift
     TOTAL=$((TOTAL+1))
     echo; echo "==================== $TOTAL. $name ===================="
     if "$@" 2>&1 | tail -3; then
